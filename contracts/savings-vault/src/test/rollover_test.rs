@@ -1,6 +1,8 @@
 //! Locked savings auto-rollover (#638).
 
-use soroban_sdk::{testutils::Address as _, token::Client as TokenClient, Address, Env, TryFromVal};
+use soroban_sdk::{
+    testutils::Address as _, token::Client as TokenClient, Address, Env, TryFromVal,
+};
 
 use super::{mint, set_ledger_time, setup_with_token_and_id, test_events};
 use crate::error::Error;
@@ -10,7 +12,17 @@ const YEAR: u64 = 31_536_000;
 const PRINCIPAL: i128 = 1_000_000;
 
 /// Vault + funded owner with one locked plan maturing a year from `start`.
-fn setup_plan(env: &Env) -> (SavingsVaultClient<'_>, Address, Address, Address, Address, u64, u64) {
+fn setup_plan(
+    env: &Env,
+) -> (
+    SavingsVaultClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+    u64,
+    u64,
+) {
     env.mock_all_auths();
     let (client, admin, token, vault) = setup_with_token_and_id(env);
     let owner = Address::generate(env);
@@ -21,7 +33,13 @@ fn setup_plan(env: &Env) -> (SavingsVaultClient<'_>, Address, Address, Address, 
     (client, admin, token, vault, owner, plan_id, start)
 }
 
-fn fund_rewards(env: &Env, client: &SavingsVaultClient, admin: &Address, token: &Address, amount: i128) {
+fn fund_rewards(
+    env: &Env,
+    client: &SavingsVaultClient,
+    admin: &Address,
+    token: &Address,
+    amount: i128,
+) {
     mint(env, token, admin, admin, amount);
     client.reward_fund(admin, &amount);
 }
@@ -71,7 +89,10 @@ fn rollover_transfers_balance_completely_and_closes_original() {
     assert_eq!(token_client.balance(&vault), vault_before);
     assert_eq!(token_client.balance(&owner), 0);
     // The original plan can't be rolled twice.
-    assert_eq!(client.try_execute_rollover(&plan_id), Err(Ok(Error::NotFound)));
+    assert_eq!(
+        client.try_execute_rollover(&plan_id),
+        Err(Ok(Error::NotFound))
+    );
 }
 
 #[test]
@@ -87,7 +108,10 @@ fn rollover_includes_accrued_interest() {
     let new_id = client.execute_rollover(&plan_id);
 
     let expected_interest = PRINCIPAL / 10;
-    assert_eq!(client.locked_plan(&new_id).balance, PRINCIPAL + expected_interest);
+    assert_eq!(
+        client.locked_plan(&new_id).balance,
+        PRINCIPAL + expected_interest
+    );
     assert_eq!(client.reward_pool_balance(), 500_000 - expected_interest);
 }
 
@@ -117,7 +141,10 @@ fn rollover_uses_configured_lock_period() {
     set_ledger_time(&env, start + YEAR + 10, 2);
     let new_id = client.execute_rollover(&plan_id);
 
-    assert_eq!(client.locked_plan(&new_id).unlock_at, start + YEAR + 10 + custom);
+    assert_eq!(
+        client.locked_plan(&new_id).unlock_at,
+        start + YEAR + 10 + custom
+    );
     // The setting carries forward to the new plan.
     assert_eq!(client.rollover_config(&new_id).unwrap().lock_period, custom);
     assert!(client.rollover_config(&plan_id).is_none());
@@ -131,7 +158,10 @@ fn rollover_rejected_before_maturity() {
     client.enable_auto_rollover(&owner, &plan_id, &0);
     set_ledger_time(&env, start + YEAR - 1, 2);
 
-    assert_eq!(client.try_execute_rollover(&plan_id), Err(Ok(Error::StillLocked)));
+    assert_eq!(
+        client.try_execute_rollover(&plan_id),
+        Err(Ok(Error::StillLocked))
+    );
 }
 
 #[test]
@@ -144,7 +174,10 @@ fn opt_out_prevents_rollover() {
     assert!(client.rollover_config(&plan_id).is_none());
 
     set_ledger_time(&env, start + YEAR, 2);
-    assert_eq!(client.try_execute_rollover(&plan_id), Err(Ok(Error::NotFound)));
+    assert_eq!(
+        client.try_execute_rollover(&plan_id),
+        Err(Ok(Error::NotFound))
+    );
     // The owner can withdraw as normal instead.
     client.locked_withdraw(&owner, &plan_id, &PRINCIPAL);
     assert_eq!(client.locked_plan(&plan_id).balance, 0);
@@ -202,7 +235,10 @@ fn rollover_event_includes_new_vault_id() {
         })
         .expect("VaultRolledOver event emitted");
 
-    assert_eq!(event.topics.get(1).and_then(|t| t.as_address()), Some(owner));
+    assert_eq!(
+        event.topics.get(1).and_then(|t| t.as_address()),
+        Some(owner)
+    );
     assert_eq!(event.topics.get(2).and_then(|t| t.as_u64()), Some(plan_id));
 
     let (_, _, data) = event.into_parts();

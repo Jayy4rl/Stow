@@ -65,7 +65,9 @@ fn request_is_stored_with_the_requested_withdrawal_and_threshold() {
             .1
             .get(0)
             .and_then(|topic| soroban_sdk::Symbol::try_from_val(&env, &topic).ok())
-            .map(|symbol| symbol == soroban_sdk::Symbol::new(&env, TOPIC_GROUP_WITHDRAWAL_REQUESTED))
+            .map(|symbol| {
+                symbol == soroban_sdk::Symbol::new(&env, TOPIC_GROUP_WITHDRAWAL_REQUESTED)
+            })
             .unwrap_or(false)
     }));
 }
@@ -158,14 +160,8 @@ fn expired_withdrawal_cannot_be_approved_or_execute() {
     let (client, token, _, member_a, member_b, group_id) = setup_funded_group(&env, 100_000);
     let recipient = Address::generate(&env);
     let now = env.ledger().timestamp();
-    let request_id = client.request_withdrawal(
-        &member_a,
-        &group_id,
-        &recipient,
-        &50_000,
-        &1,
-        &(now + 10),
-    );
+    let request_id =
+        client.request_withdrawal(&member_a, &group_id, &recipient, &50_000, &1, &(now + 10));
     set_ledger_time(&env, now + 10, env.ledger().sequence() + 1);
 
     assert_eq!(

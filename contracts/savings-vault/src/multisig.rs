@@ -84,14 +84,7 @@ pub fn request_withdrawal(
     env.events().publish(
         (TOPIC_GROUP_WITHDRAWAL_REQUESTED, requester.clone(), id),
         (
-            id,
-            group_id,
-            requester,
-            recipient,
-            amount,
-            threshold,
-            expires_at,
-            now,
+            id, group_id, requester, recipient, amount, threshold, expires_at, now,
         ),
     );
     Ok(id)
@@ -99,11 +92,7 @@ pub fn request_withdrawal(
 
 /// Record a group member's approval. When the request reaches its threshold,
 /// the withdrawal is paid atomically to the recorded recipient.
-pub fn approve_withdrawal(
-    env: &Env,
-    approver: Address,
-    request_id: u64,
-) -> Result<(), Error> {
+pub fn approve_withdrawal(env: &Env, approver: Address, request_id: u64) -> Result<(), Error> {
     extend_instance_ttl(env);
     require_not_paused(env)?;
     approver.require_auth();
@@ -128,13 +117,21 @@ pub fn approve_withdrawal(
     if !group.members.iter().any(|member| member == approver) {
         return Err(Error::Unauthorized);
     }
-    if request.approvers.iter().any(|approved| approved == approver) {
+    if request
+        .approvers
+        .iter()
+        .any(|approved| approved == approver)
+    {
         return Err(Error::AlreadyVoted);
     }
 
     request.approvers.push_back(approver.clone());
     env.events().publish(
-        (TOPIC_GROUP_WITHDRAWAL_APPROVED, approver.clone(), request_id),
+        (
+            TOPIC_GROUP_WITHDRAWAL_APPROVED,
+            approver.clone(),
+            request_id,
+        ),
         (
             request_id,
             request.group_id,
@@ -177,11 +174,7 @@ pub fn approve_withdrawal(
 }
 
 /// Reject and cancel a pending withdrawal. Any current group member may veto.
-pub fn reject_withdrawal(
-    env: &Env,
-    rejector: Address,
-    request_id: u64,
-) -> Result<(), Error> {
+pub fn reject_withdrawal(env: &Env, rejector: Address, request_id: u64) -> Result<(), Error> {
     extend_instance_ttl(env);
     require_not_paused(env)?;
     rejector.require_auth();
@@ -210,7 +203,11 @@ pub fn reject_withdrawal(
     env.storage().persistent().set(&request_key, &request);
     storage::extend_persistent_ttl(env, &request_key);
     env.events().publish(
-        (TOPIC_GROUP_WITHDRAWAL_REJECTED, rejector.clone(), request_id),
+        (
+            TOPIC_GROUP_WITHDRAWAL_REJECTED,
+            rejector.clone(),
+            request_id,
+        ),
         (
             request_id,
             request.group_id,
@@ -222,10 +219,7 @@ pub fn reject_withdrawal(
 }
 
 /// Read a withdrawal request, including its current approval list.
-pub fn get_withdrawal_request(
-    env: &Env,
-    request_id: u64,
-) -> Result<GroupWithdrawalRequest, Error> {
+pub fn get_withdrawal_request(env: &Env, request_id: u64) -> Result<GroupWithdrawalRequest, Error> {
     let key = DataKey::GroupWithdrawal(request_id);
     let request = env
         .storage()

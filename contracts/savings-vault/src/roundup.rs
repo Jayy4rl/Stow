@@ -3,19 +3,30 @@
 //! An owner opts in with [`enable`] and picks a [`RoundupLevel`]. Each
 //! external transaction reported through [`record_transaction`] is rounded up
 //! to the next multiple of the level's step. The difference is deposited into
-//! the owner's flexible savings and a `roundup_deposit` event is emitted.
+//! the owner's flexible savings and a `RoundupDeposit` event is emitted.
+//!
+//! Round-ups can be turned off with [`disable`] and back on with [`enable`];
+//! the running totals survive both. While disabled, reported transactions are
+//! ignored.
+//!
+//! If the owner's token balance cannot cover a difference, the transaction is
+//! still tracked but nothing is deposited: the difference is added to
+//! `skipped_total`, a `RoundupSkipped` event is emitted and `0` is returned.
+//! The call does not fail, so a short balance never blocks reporting.
 //!
 //! The owner authorizes each call, so the difference is taken from the
 //! owner's own token balance, the same as a manual deposit.
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{token, Address, Env};
 
 use crate::error::Error;
-use crate::events::TOPIC_ROUNDUP_DEPOSIT;
-use crate::storage::{extend_instance_ttl, extend_persistent_ttl};
+use crate::events::{
+    TOPIC_ROUNDUP_DEPOSIT, TOPIC_ROUNDUP_DISABLED, TOPIC_ROUNDUP_ENABLED, TOPIC_ROUNDUP_SKIPPED,
+};
+use crate::storage::{extend_instance_ttl, extend_persistent_ttl, get_token};
 use crate::types::{DataKey, RoundupConfig, RoundupLevel};
 
-fn step(level: RoundupLevel) -> i128 {
+pub(crate) fn step(level: RoundupLevel) -> i128 {
     match level {
         RoundupLevel::Nearest1 => 1,
         RoundupLevel::Nearest5 => 5,
@@ -57,16 +68,39 @@ pub fn enable(env: &Env, owner: Address, level: RoundupLevel) -> Result<(), Erro
     let config = match load(env, &owner) {
         Some(mut existing) => {
             existing.level = level;
+            existing.enabled = true;
             existing
         }
         None => RoundupConfig {
             owner: owner.clone(),
             level,
+            enabled: true,
             tracked_total: 0,
             deposited_total: 0,
+            skipped_total: 0,
         },
     };
     store(env, &config);
+    env.events()
+        .publish((TOPIC_ROUNDUP_ENABLED, owner), step(level));
+    Ok(())
+}
+
+/// Turn off round-ups for `owner`. The configuration and totals are kept so
+/// [`enable`] can turn them back on.
+///
+/// # Errors
+/// - [`Error::NotFound`] if the owner never enabled round-ups.
+pub fn disable(env: &Env, owner: Address) -> Result<(), Error> {
+    extend_instance_ttl(env);
+    owner.require_auth();
+
+    let mut config = load(env, &owner).ok_or(Error::NotFound)?;
+    if config.enabled {
+        config.enabled = false;
+        store(env, &config);
+        env.events().publish((TOPIC_ROUNDUP_DISABLED, owner), ());
+    }
     Ok(())
 }
 
@@ -81,13 +115,16 @@ pub fn get_config(env: &Env, owner: Address) -> Result<RoundupConfig, Error> {
 /// Record an external transaction of `amount` for `owner`, and deposit its
 /// round-up difference into the owner's flexible savings.
 ///
-/// Returns the amount deposited (zero when `amount` is already a multiple of
-/// the owner's step).
+/// Returns the amount deposited. That is zero when `amount` is already a
+/// multiple of the owner's step, when round-ups are disabled (the
+/// transaction is then not tracked), or when the owner's token balance
+/// cannot cover the difference (tracked, and counted in `skipped_total`).
 ///
 /// # Errors
-/// - [`Error::InvalidAmount`] if `amount` is not positive.
-/// - [`Error::NotFound`]     if the owner never enabled round-ups.
-/// - Any error from the flexible deposit (pause, emergency, token failure).
+/// - [`Error::InvalidAmount`]  if `amount` is not positive.
+/// - [`Error::NotFound`]       if the owner never enabled round-ups.
+/// - [`Error::NotInitialized`] if the vault token is not configured.
+/// - Any error from the flexible deposit (pause, emergency, deposit limits).
 pub fn record_transaction(env: &Env, owner: Address, amount: i128) -> Result<i128, Error> {
     extend_instance_ttl(env);
     crate::admin::require_not_paused(env)?;
@@ -96,138 +133,59 @@ pub fn record_transaction(env: &Env, owner: Address, amount: i128) -> Result<i12
         return Err(Error::InvalidAmount);
     }
     let mut config = load(env, &owner).ok_or(Error::NotFound)?;
+    if !config.enabled {
+        owner.require_auth();
+        return Ok(0);
+    }
     let difference = roundup_difference(amount, config.level)?;
 
     config.tracked_total = config
         .tracked_total
         .checked_add(amount)
         .ok_or(Error::Overflow)?;
-    if difference > 0 {
-        // The flexible deposit requires the owner's auth. Calling
-        // `require_auth` here as well would fail: Soroban rejects a second
-        // authorization of the same address within one invocation.
-        crate::flexible::deposit(env, owner.clone(), difference)?;
-        config.deposited_total = config
-            .deposited_total
+
+    if difference == 0 {
+        owner.require_auth();
+        store(env, &config);
+        return Ok(0);
+    }
+
+    let token_address = get_token(env).ok_or(Error::NotInitialized)?;
+    let available = token::Client::new(env, &token_address).balance(&owner);
+    if available < difference {
+        owner.require_auth();
+        config.skipped_total = config
+            .skipped_total
             .checked_add(difference)
             .ok_or(Error::Overflow)?;
+        store(env, &config);
         env.events().publish(
-            (TOPIC_ROUNDUP_DEPOSIT, owner.clone()),
-            (amount, difference, config.deposited_total),
+            (TOPIC_ROUNDUP_SKIPPED, owner),
+            (amount, difference, available),
         );
-    } else {
-        owner.require_auth();
+        return Ok(0);
     }
+
+    // The flexible deposit requires the owner's auth. Calling `require_auth`
+    // here as well would fail: Soroban rejects a second authorization of the
+    // same address within one invocation.
+    crate::flexible::deposit(env, owner.clone(), difference)?;
+    config.deposited_total = config
+        .deposited_total
+        .checked_add(difference)
+        .ok_or(Error::Overflow)?;
     store(env, &config);
+
+    let rounded_amount = amount.checked_add(difference).ok_or(Error::Overflow)?;
+    env.events().publish(
+        (TOPIC_ROUNDUP_DEPOSIT, owner),
+        (
+            amount,
+            rounded_amount,
+            difference,
+            step(config.level),
+            config.deposited_total,
+        ),
+    );
     Ok(difference)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::testutils::Events as _;
-    use soroban_sdk::{String, TryFromVal};
-
-    use crate::test::register_vault;
-
-    #[test]
-    fn difference_rounds_up_to_each_level() {
-        // (amount, level, expected difference)
-        let cases = [
-            (123, RoundupLevel::Nearest1, 0),
-            (123, RoundupLevel::Nearest5, 2),
-            (123, RoundupLevel::Nearest10, 7),
-            (120, RoundupLevel::Nearest10, 0),
-            (121, RoundupLevel::Nearest5, 4),
-            (4, RoundupLevel::Nearest5, 1),
-        ];
-        for (amount, level, expected) in cases {
-            assert_eq!(roundup_difference(amount, level).unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn transaction_deposits_difference_into_savings() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (vault, token, owner) = register_vault(&env);
-        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&owner, &1_000);
-
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest10);
-        let diff = vault.record_roundup_transaction(&owner, &123);
-
-        assert_eq!(diff, 7);
-        assert_eq!(vault.get_account(&owner).balance, 7);
-        let config = vault.roundup_config(&owner);
-        assert_eq!(config.tracked_total, 123);
-        assert_eq!(config.deposited_total, 7);
-    }
-
-    #[test]
-    fn emits_roundup_deposit_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (vault, token, owner) = register_vault(&env);
-        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&owner, &1_000);
-
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest10);
-        vault.record_roundup_transaction(&owner, &123);
-
-        let expected = String::from_str(&env, TOPIC_ROUNDUP_DEPOSIT);
-        let emitted = env.events().all().iter().any(|(_, topics, _)| {
-            topics
-                .get(0)
-                .and_then(|v| String::try_from_val(&env, &v).ok())
-                == Some(expected.clone())
-        });
-        assert!(emitted, "a roundup_deposit event must be emitted");
-    }
-
-    #[test]
-    fn exact_multiple_saves_nothing() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (vault, _token, owner) = register_vault(&env);
-
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest5);
-        assert_eq!(vault.record_roundup_transaction(&owner, &40), 0);
-        let config = vault.roundup_config(&owner);
-        assert_eq!(config.tracked_total, 40);
-        assert_eq!(config.deposited_total, 0);
-    }
-
-    #[test]
-    fn requires_enable_and_positive_amount() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (vault, _token, owner) = register_vault(&env);
-
-        assert_eq!(
-            vault.try_record_roundup_transaction(&owner, &10),
-            Err(Ok(Error::NotFound))
-        );
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest1);
-        assert_eq!(
-            vault.try_record_roundup_transaction(&owner, &0),
-            Err(Ok(Error::InvalidAmount))
-        );
-    }
-
-    #[test]
-    fn re_enabling_changes_level_and_keeps_totals() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let (vault, token, owner) = register_vault(&env);
-        soroban_sdk::token::StellarAssetClient::new(&env, &token).mint(&owner, &1_000);
-
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest10);
-        vault.record_roundup_transaction(&owner, &123);
-        vault.enable_roundup(&owner, &RoundupLevel::Nearest5);
-
-        let config = vault.roundup_config(&owner);
-        assert_eq!(config.level, RoundupLevel::Nearest5);
-        assert_eq!(config.tracked_total, 123);
-        assert_eq!(config.deposited_total, 7);
-        assert_eq!(vault.record_roundup_transaction(&owner, &123), 2);
-    }
 }

@@ -219,7 +219,7 @@ pub fn deposit(env: &Env, owner: Address, amount: i128) -> Result<(), Error> {
         .checked_add(amount)
         .ok_or(Error::Overflow)?;
     let old_rate_bps = account.rate_bps;
-    let new_rate_bps = interest_tiers::effective_rate_bps(env, new_balance, 0);
+    let new_rate_bps = interest_tiers::rate_for(env, new_balance, 0, rate_bps(env));
     account.rate_bps = new_rate_bps;
 
     account.principal = new_balance;
@@ -292,7 +292,7 @@ pub fn withdraw(env: &Env, owner: Address, amount: i128) -> Result<(), Error> {
 
     // Update the tiered rate based on the post-withdrawal balance.
     let old_rate_bps = account.rate_bps;
-    let new_rate_bps = interest_tiers::effective_rate_bps(env, new_principal, 0);
+    let new_rate_bps = interest_tiers::rate_for(env, new_principal, 0, rate_bps(env));
     account.rate_bps = new_rate_bps;
     account.principal = new_principal;
     account.updated_at = now;
@@ -349,7 +349,7 @@ pub fn claim(env: &Env, owner: Address) -> Result<i128, Error> {
 
     // Refresh tiered rate based on current principal after settlement.
     let old_rate_bps = account.rate_bps;
-    let new_rate_bps = interest_tiers::effective_rate_bps(env, account.principal, 0);
+    let new_rate_bps = interest_tiers::rate_for(env, account.principal, 0, rate_bps(env));
     account.rate_bps = new_rate_bps;
     account.updated_at = now;
 

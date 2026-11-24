@@ -5,7 +5,7 @@ use soroban_sdk::{Address, BytesN, Env};
 use crate::error::Error;
 use crate::events::{
     EVENT_SCHEMA_VERSION, TOPIC_ADMIN_SET, TOPIC_EMERGENCY_MODE_SET, TOPIC_INIT, TOPIC_PAUSED,
-    TOPIC_UNPAUSED, TOPIC_UPGRADED, TOPIC_UPGRADE_CANCELLED, TOPIC_UPGRADE_PROPOSED,
+    TOPIC_UNPAUSED, TOPIC_UPGRADED, TOPIC_UPGRADE_PROPOSED,
 };
 use crate::storage::{self, extend_instance_ttl};
 use crate::types::{DataKey, UpgradeProposal};

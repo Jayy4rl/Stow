@@ -61,7 +61,7 @@ describe('AccountMergeService', () => {
   it('moves balance, goals, plans and history to the target and archives the source', async () => {
     const source = account(SOURCE, '1500');
     const target = account(TARGET, '250');
-    manager.find.mockResolvedValue([source, target]);
+    manager.find.mockResolvedValueOnce([source, target]).mockResolvedValue([]);
 
     const result = await service.merge(SOURCE, TARGET);
 

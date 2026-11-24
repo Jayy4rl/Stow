@@ -213,8 +213,15 @@ pub const TOPIC_DELEGATION_UPDATED: &str = "delegation_updated";
 pub const TOPIC_DELEGATION_REVOKED: &str = "delegation_revoked";
 
 // --- roundup -----------------------------------------------------------
+/// Emitted when an owner turns round-ups on or changes the level.
+pub const TOPIC_ROUNDUP_ENABLED: &str = "roundup_enabled";
+/// Emitted when an owner turns round-ups off.
+pub const TOPIC_ROUNDUP_DISABLED: &str = "roundup_disabled";
 /// Emitted when an external transaction's round-up difference is deposited.
-pub const TOPIC_ROUNDUP_DEPOSIT: &str = "roundup_deposit";
+pub const TOPIC_ROUNDUP_DEPOSIT: &str = "RoundupDeposit";
+/// Emitted when a round-up is skipped because the owner's token balance
+/// cannot cover the difference.
+pub const TOPIC_ROUNDUP_SKIPPED: &str = "RoundupSkipped";
 
 // --- locked rollover (#638) ---------------------------------------------
 /// Emitted when an owner enables (or reconfigures) auto-rollover on a plan.
@@ -241,3 +248,24 @@ pub const TOPIC_WITHDRAWAL_CONDITION_CANCELLED: &str = "withdrawal_condition_can
 /// Data:   `(owner: Address, amount: i128, condition: WithdrawalCondition,
 ///          observed: i128, new_balance: i128, timestamp: u64)`
 pub const TOPIC_CONDITIONAL_WITHDRAWAL: &str = "ConditionalWithdrawal";
+
+// --- inheritance planning (#635) ----------------------------------------
+/// Emitted when an owner creates or replaces an inheritance plan.
+///
+/// Topics: `(Symbol("InheritanceSetup"), owner: Address)`
+/// Data:   `(owner: Address, beneficiary_count: u32, inactivity_period: u64,
+///          partial_access_bps: u32, proof_required: bool, timestamp: u64)`
+pub const TOPIC_INHERITANCE_SETUP: &str = "InheritanceSetup";
+/// Emitted when the verifier attests the owner's proof of death.
+///
+/// Topics: `(Symbol("InheritanceProofVerified"), owner: Address)`
+/// Data:   `(owner: Address, verifier: Address, proof_hash: BytesN<32>, timestamp: u64)`
+pub const TOPIC_INHERITANCE_PROOF_VERIFIED: &str = "InheritanceProofVerified";
+/// Emitted on every successful beneficiary claim (partial or full).
+///
+/// Topics: `(Symbol("InheritanceClaimed"), owner: Address, beneficiary: Address)`
+/// Data:   `(owner: Address, beneficiary: Address, amount: i128,
+///          total_claimed: i128, unlocked_bps: u32, timestamp: u64)`
+pub const TOPIC_INHERITANCE_CLAIMED: &str = "InheritanceClaimed";
+/// Emitted when the owner cancels their inheritance plan.
+pub const TOPIC_INHERITANCE_CANCELLED: &str = "InheritanceCancelled";

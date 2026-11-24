@@ -33,11 +33,7 @@ pub fn deposit(env: &Env, from: Address, amount: i128) -> Result<(), Error> {
 
 /// Deposit from an owner who previously authorized the vault through SEP-41
 /// allowance. Used by permissionless recurring-deposit execution.
-pub(crate) fn deposit_from_allowance(
-    env: &Env,
-    from: Address,
-    amount: i128,
-) -> Result<(), Error> {
+pub(crate) fn deposit_from_allowance(env: &Env, from: Address, amount: i128) -> Result<(), Error> {
     deposit_with_transfer(
         env,
         from,
@@ -98,7 +94,14 @@ fn deposit_with_transfer(
     account.balance = new_balance;
     account.updated_at = now;
     env.storage().persistent().set(&key, &account);
+    crate::inheritance::touch_owner(env, &from);
     storage::extend_persistent_ttl(env, &key);
+
+    // Owner-signed deposits count as activity for inheritance planning.
+    // Allowance-driven (keeper) deposits do not prove the owner is alive.
+    if require_owner_auth {
+        crate::inheritance::touch_owner(env, &from);
+    }
 
     env.events().publish(
         (TOPIC_DEPOSIT, from.clone()),
@@ -156,7 +159,10 @@ pub fn withdraw(env: &Env, owner: Address, amount: i128) -> Result<(), Error> {
     account.balance = new_balance;
     account.updated_at = now;
     env.storage().persistent().set(&key, &account);
+    crate::inheritance::touch_owner(env, &owner);
     storage::extend_persistent_ttl(env, &key);
+
+    crate::inheritance::touch_owner(env, &owner);
 
     env.events().publish(
         (TOPIC_WITHDRAW, owner.clone()),

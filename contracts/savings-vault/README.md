@@ -416,6 +416,47 @@ cancelled at any time.
 - **Returns:** the amount withdrawn.
 - **Events:** [`ConditionalWithdrawal`](#conditionalwithdrawal).
 
+### Inheritance planning
+
+An owner hands their flexible balance to beneficiaries gradually. After
+`inactivity_period` seconds without owner activity (deposit, withdraw or
+`inheritance_check_in`), each beneficiary may claim `partial_access_bps` of
+their share. Once the plan's `verifier` attests a proof of death, the rest
+unlocks. Plans without a verifier unlock in full after the inactivity period.
+Shares are computed against a balance snapshot taken at the first claim, so
+claim order never changes what anyone receives. Owner activity voids any
+attested proof.
+
+#### `setup_inheritance(owner: Address, beneficiaries: Map<Address, u32>, inactivity_period: u64, partial_access_bps: u32, verifier: Option<Address>) -> Result<(), Error>`
+- **Auth:** `owner`. Replaces any plan that has no paid-out claims.
+- **Errors:** `InvalidParameters` (no beneficiaries, owner as heir, zero
+  period, `partial_access_bps > 10_000`), `InvalidShares` (zero share or
+  shares not summing to 10 000), `InvalidAddress` (owner as verifier),
+  `ConflictingState` (claims already paid), `Paused`.
+- **Events:** `InheritanceSetup`.
+
+#### `cancel_inheritance(owner: Address) -> Result<(), Error>`
+- **Auth:** `owner`. **Errors:** `NotFound`. **Events:** `InheritanceCancelled`.
+
+#### `inheritance_check_in(owner: Address) -> Result<(), Error>`
+- **Auth:** `owner`. Resets the inactivity clock. **Errors:** `NotFound`.
+
+#### `verify_death_proof(verifier: Address, owner: Address, proof_hash: BytesN<32>) -> Result<(), Error>`
+- **Auth:** the plan's `verifier`.
+- **Errors:** `NotFound`, `Unauthorized`, `StillLocked` (inactivity period
+  not elapsed), `ConflictingState` (already attested), `Paused`.
+- **Events:** `InheritanceProofVerified`.
+
+#### `claim_inheritance(beneficiary: Address, owner: Address) -> Result<i128, Error>`
+- **Auth:** `beneficiary`. Pays everything unlocked and not yet claimed.
+- **Errors:** `NotFound`, `Unauthorized` (not an heir), `StillLocked`,
+  `InsufficientBalance` (nothing left to claim), `Paused`.
+- **Returns:** the amount paid.
+- **Events:** `InheritanceClaimed` on every payout.
+
+#### `inheritance_plan(owner: Address) -> Option<InheritancePlan>` / `inheritance_claimable(owner: Address, beneficiary: Address) -> i128`
+- **Auth:** none (read-only).
+
 ### Locked savings — deterministic on-chain time locks
 
 #### `locked_create(owner: Address, amount: i128, unlock_at: u64) -> Result<u64, Error>`

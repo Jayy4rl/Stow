@@ -1,0 +1,407 @@
+//! Savings challenge contract tests (#623).
+
+extern crate std;
+
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger};
+use soroban_sdk::{token, Address, Env, Symbol, TryFromVal};
+
+use crate::{
+    ChallengeConfig, ChallengeContract, ChallengeContractClient, ChallengeKind, ChallengeStatus,
+    Error,
+};
+
+const DAY: u64 = 86_400;
+const START: u64 = 1_000_000;
+const STAKE: i128 = 1_000;
+
+struct Ctx<'a> {
+    env: Env,
+    client: ChallengeContractClient<'a>,
+    token: Address,
+}
+
+fn setup<'a>() -> Ctx<'a> {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = START);
+    let client = ChallengeContractClient::new(&env, &env.register(ChallengeContract, ()));
+    let token = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    Ctx { env, client, token }
+}
+
+impl Ctx<'_> {
+    fn config(&self, kind: ChallengeKind, target: i128) -> ChallengeConfig {
+        ChallengeConfig {
+            token: self.token.clone(),
+            kind,
+            target,
+            entry_fee: STAKE,
+            penalty_bps: 2_000, // 20%
+            deadline: START + 7 * DAY,
+            period: DAY,
+            min_participants: 2,
+            max_participants: 10,
+        }
+    }
+
+    fn create(&self, config: &ChallengeConfig) -> u64 {
+        self.client
+            .create_challenge(&Address::generate(&self.env), config)
+    }
+
+    fn funded(&self, amount: i128) -> Address {
+        let who = Address::generate(&self.env);
+        token::StellarAssetClient::new(&self.env, &self.token).mint(&who, &amount);
+        who
+    }
+
+    fn joined(&self, id: u64, funds: i128) -> Address {
+        let who = self.funded(funds);
+        self.client.join(&who, &id);
+        who
+    }
+
+    fn balance(&self, who: &Address) -> i128 {
+        token::Client::new(&self.env, &self.token).balance(who)
+    }
+
+    fn advance(&self, seconds: u64) {
+        self.env.ledger().with_mut(|l| l.timestamp += seconds);
+    }
+
+    fn end(&self, id: u64) {
+        let deadline = self.client.get_challenge(&id).config.deadline;
+        self.env.ledger().with_mut(|l| l.timestamp = deadline);
+    }
+
+    /// Whether the last invocation emitted a `(challenge, <name>)` event.
+    fn emitted(&self, name: &str) -> bool {
+        let challenge = Symbol::new(&self.env, "challenge");
+        let name = Symbol::new(&self.env, name);
+        self.env.events().all().iter().any(|(contract, topics, _)| {
+            contract == self.client.address
+                && topics
+                    .get(0)
+                    .and_then(|v| Symbol::try_from_val(&self.env, &v).ok())
+                    == Some(challenge.clone())
+                && topics
+                    .get(1)
+                    .and_then(|v| Symbol::try_from_val(&self.env, &v).ok())
+                    == Some(name.clone())
+        })
+    }
+}
+
+// ── Creation ───────────────────────────────────────────────────────────────
+
+#[test]
+fn challenge_created_with_correct_parameters() {
+    let c = setup();
+    let config = c.config(ChallengeKind::TotalSaved, 5_000);
+    let creator = Address::generate(&c.env);
+
+    let id = c.client.create_challenge(&creator, &config);
+    assert!(c.emitted("created"));
+    assert_eq!(id, 1);
+
+    let challenge = c.client.get_challenge(&id);
+    assert_eq!(challenge.id, 1);
+    assert_eq!(challenge.creator, creator);
+    assert_eq!(challenge.config, config);
+    assert_eq!(challenge.status, ChallengeStatus::Open);
+    assert_eq!(challenge.start, START);
+    assert_eq!(challenge.participant_count, 0);
+    assert_eq!(c.client.get_participants(&id).len(), 0);
+
+    assert_eq!(c.create(&config), 2);
+}
+
+#[test]
+fn create_rejects_invalid_parameters() {
+    let c = setup();
+    let creator = Address::generate(&c.env);
+    let base = c.config(ChallengeKind::TotalSaved, 5_000);
+    let try_create = |config: &ChallengeConfig| c.client.try_create_challenge(&creator, config);
+
+    let mut bad = base.clone();
+    bad.entry_fee = 0;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidAmount)));
+
+    let mut bad = base.clone();
+    bad.target = 0;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidAmount)));
+
+    let mut bad = base.clone();
+    bad.deadline = START;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidTimestamp)));
+
+    let mut bad = base.clone();
+    bad.penalty_bps = 10_001;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+
+    let mut bad = base.clone();
+    bad.min_participants = 0;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+
+    let mut bad = base.clone();
+    bad.max_participants = 1;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+
+    let mut bad = base.clone();
+    bad.max_participants = crate::MAX_PARTICIPANTS + 1;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+
+    let mut bad = c.config(ChallengeKind::Consistency, 3);
+    bad.period = 0;
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+
+    // Seven daily periods fit before the deadline; eight cannot be reached.
+    let bad = c.config(ChallengeKind::Consistency, 8);
+    assert_eq!(try_create(&bad), Err(Ok(Error::InvalidParameters)));
+    let ok = c.config(ChallengeKind::Consistency, 7);
+    assert!(try_create(&ok).is_ok());
+}
+
+// ── Joining ────────────────────────────────────────────────────────────────
+
+#[test]
+fn participants_join_by_paying_the_entry_fee() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+
+    let alice = c.funded(10_000);
+    c.client.join(&alice, &id);
+    assert!(c.emitted("joined"));
+
+    assert_eq!(c.balance(&alice), 10_000 - STAKE);
+    assert_eq!(c.balance(&c.client.address), STAKE);
+    let p = c.client.get_participant(&id, &alice);
+    assert_eq!(p.stake, STAKE);
+    assert_eq!(p.saved, 0);
+    assert!(!p.settled);
+    assert_eq!(c.client.get_challenge(&id).participant_count, 1);
+    assert_eq!(c.client.get_participants(&id).get(0), Some(alice.clone()));
+
+    assert_eq!(c.client.try_join(&alice, &id), Err(Ok(Error::AlreadyJoined)));
+    assert_eq!(c.client.try_join(&alice, &99), Err(Ok(Error::NotFound)));
+}
+
+#[test]
+fn join_rejected_when_full_or_after_deadline() {
+    let c = setup();
+    let mut config = c.config(ChallengeKind::TotalSaved, 5_000);
+    config.max_participants = 2;
+    let id = c.create(&config);
+
+    c.joined(id, STAKE);
+    c.joined(id, STAKE);
+    let late = c.funded(STAKE);
+    assert_eq!(c.client.try_join(&late, &id), Err(Ok(Error::ChallengeFull)));
+
+    let id2 = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+    c.end(id2);
+    assert_eq!(c.client.try_join(&late, &id2), Err(Ok(Error::ChallengeEnded)));
+    assert_eq!(c.balance(&late), STAKE);
+}
+
+// ── Progress ───────────────────────────────────────────────────────────────
+
+#[test]
+fn progress_is_tracked_accurately() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+    let alice = c.joined(id, 10_000);
+
+    c.client.deposit(&alice, &id, &2_000);
+    assert!(c.emitted("progress"));
+    assert!(!c.client.is_on_track(&id, &alice));
+    c.client.deposit(&alice, &id, &1_000);
+    c.advance(DAY);
+    c.client.deposit(&alice, &id, &2_500);
+
+    let p = c.client.get_participant(&id, &alice);
+    assert_eq!(p.saved, 5_500);
+    assert_eq!(p.deposits, 3);
+    assert_eq!(p.first_deposit, 2_000);
+    assert_eq!(p.active_periods, 2);
+    assert!(c.client.is_on_track(&id, &alice));
+    assert_eq!(c.balance(&alice), 10_000 - STAKE - 5_500);
+    assert_eq!(c.balance(&c.client.address), STAKE + 5_500);
+}
+
+#[test]
+fn deposit_rejects_bad_input() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+    let alice = c.joined(id, 10_000);
+    let stranger = c.funded(10_000);
+
+    assert_eq!(
+        c.client.try_deposit(&alice, &id, &0),
+        Err(Ok(Error::InvalidAmount))
+    );
+    assert_eq!(
+        c.client.try_deposit(&stranger, &id, &100),
+        Err(Ok(Error::NotAParticipant))
+    );
+    c.end(id);
+    assert_eq!(
+        c.client.try_deposit(&alice, &id, &100),
+        Err(Ok(Error::ChallengeEnded))
+    );
+}
+
+// ── Settlement ─────────────────────────────────────────────────────────────
+
+#[test]
+fn prizes_go_to_winners_and_losers_get_stake_minus_fee() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+    let alice = c.joined(id, 10_000);
+    let bob = c.joined(id, 10_000);
+    let carol = c.joined(id, 10_000);
+
+    c.client.deposit(&alice, &id, &5_000);
+    c.client.deposit(&bob, &id, &6_000);
+    c.client.deposit(&carol, &id, &1_000); // short of the target
+
+    assert_eq!(
+        c.client.try_settle(&id, &alice),
+        Err(Ok(Error::ChallengeNotEnded))
+    );
+    c.end(id);
+
+    // Carol loses 20% of her stake (200) into the pool; the two winners
+    // share it.
+    let carol_payout = c.client.settle(&id, &carol);
+    assert!(c.emitted("final"));
+    assert!(c.emitted("settled"));
+    assert_eq!(carol_payout, STAKE - 200 + 1_000);
+    let challenge = c.client.get_challenge(&id);
+    assert_eq!(challenge.status, ChallengeStatus::Settling);
+    assert_eq!(challenge.winners, 2);
+    assert_eq!(challenge.prize_pool, 200);
+
+    assert_eq!(c.client.settle(&id, &alice), STAKE + 5_000 + 100);
+    assert_eq!(c.client.settle(&id, &bob), STAKE + 6_000 + 100);
+    assert!(c.emitted("closed"));
+
+    assert_eq!(c.balance(&alice), 10_000 + 100);
+    assert_eq!(c.balance(&bob), 10_000 + 100);
+    assert_eq!(c.balance(&carol), 10_000 - 200);
+    assert_eq!(c.balance(&c.client.address), 0);
+    assert_eq!(c.client.get_challenge(&id).status, ChallengeStatus::Closed);
+    assert_eq!(
+        c.client.try_settle(&id, &alice),
+        Err(Ok(Error::AlreadySettled))
+    );
+}
+
+#[test]
+fn last_winner_receives_the_rounding_remainder() {
+    let c = setup();
+    let mut config = c.config(ChallengeKind::TotalSaved, 100);
+    config.penalty_bps = 1_000; // 10% of 1_000 = 100 per loser
+    let id = c.create(&config);
+    let winners = [c.joined(id, 10_000), c.joined(id, 10_000), c.joined(id, 10_000)];
+    let loser = c.joined(id, 10_000);
+    for w in winners.iter() {
+        c.client.deposit(w, &id, &100);
+    }
+    c.end(id);
+
+    c.client.settle(&id, &loser);
+    // Pool of 100 split three ways: 33, 33, then 34.
+    assert_eq!(c.client.settle(&id, &winners[0]), STAKE + 100 + 33);
+    assert_eq!(c.client.settle(&id, &winners[1]), STAKE + 100 + 33);
+    assert_eq!(c.client.settle(&id, &winners[2]), STAKE + 100 + 34);
+    assert_eq!(c.balance(&c.client.address), 0);
+}
+
+#[test]
+fn everyone_is_refunded_when_nobody_succeeds() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::TotalSaved, 5_000));
+    let alice = c.joined(id, 10_000);
+    let bob = c.joined(id, 10_000);
+    c.client.deposit(&alice, &id, &1_000);
+    c.end(id);
+
+    assert_eq!(c.client.settle(&id, &alice), STAKE + 1_000);
+    assert_eq!(c.client.settle(&id, &bob), STAKE);
+    assert_eq!(c.client.get_challenge(&id).winners, 0);
+    assert_eq!(c.balance(&alice), 10_000);
+    assert_eq!(c.balance(&bob), 10_000);
+}
+
+#[test]
+fn everyone_is_refunded_below_min_participants() {
+    let c = setup();
+    let mut config = c.config(ChallengeKind::TotalSaved, 5_000);
+    config.min_participants = 3;
+    let id = c.create(&config);
+    let alice = c.joined(id, 10_000);
+    let bob = c.joined(id, 10_000);
+    c.client.deposit(&alice, &id, &5_000);
+    c.end(id);
+
+    assert_eq!(c.client.settle(&id, &bob), STAKE);
+    assert_eq!(c.client.settle(&id, &alice), STAKE + 5_000);
+    assert_eq!(c.balance(&alice), 10_000);
+    assert_eq!(c.balance(&bob), 10_000);
+}
+
+// ── Challenge kinds ────────────────────────────────────────────────────────
+
+#[test]
+fn consistency_counts_distinct_periods() {
+    let c = setup();
+    let id = c.create(&c.config(ChallengeKind::Consistency, 3));
+    let steady = c.joined(id, 10_000);
+    let bursty = c.joined(id, 10_000);
+
+    for _ in 0..3 {
+        c.client.deposit(&steady, &id, &10);
+        c.client.deposit(&bursty, &id, &10);
+        c.client.deposit(&bursty, &id, &10);
+    }
+    // So far everything happened in period 0.
+    assert_eq!(c.client.get_participant(&id, &bursty).active_periods, 1);
+
+    c.advance(DAY);
+    c.client.deposit(&steady, &id, &10);
+    c.advance(2 * DAY);
+    c.client.deposit(&steady, &id, &10);
+
+    assert_eq!(c.client.get_participant(&id, &steady).active_periods, 3);
+    assert!(c.client.is_on_track(&id, &steady));
+    assert!(!c.client.is_on_track(&id, &bursty));
+
+    c.end(id);
+    c.client.settle(&id, &bursty);
+    assert_eq!(c.client.get_challenge(&id).winners, 1);
+}
+
+#[test]
+fn growth_rate_measures_growth_over_first_deposit() {
+    let c = setup();
+    // At least 50% growth over the opening deposit.
+    let id = c.create(&c.config(ChallengeKind::GrowthRate, 5_000));
+    let grower = c.joined(id, 10_000);
+    let flat = c.joined(id, 10_000);
+
+    c.client.deposit(&grower, &id, &1_000);
+    c.client.deposit(&grower, &id, &499);
+    assert!(!c.client.is_on_track(&id, &grower));
+    c.client.deposit(&grower, &id, &1);
+    assert!(c.client.is_on_track(&id, &grower));
+
+    c.client.deposit(&flat, &id, &5_000);
+    assert!(!c.client.is_on_track(&id, &flat));
+
+    c.end(id);
+    assert_eq!(c.client.settle(&id, &flat), STAKE - 200 + 5_000);
+    assert_eq!(c.client.settle(&id, &grower), STAKE + 1_500 + 200);
+}

@@ -56,7 +56,7 @@ use soroban_sdk::{Address, BytesN, Env};
 use crate::admin;
 use crate::error::Error;
 use crate::events::{
-    TOPIC_UPGRADE_CANCELLED, TOPIC_UPGRADE_PROPOSED, TOPIC_UPGRADE_ROLLED_BACK, TOPIC_UPGRADED,
+    TOPIC_UPGRADED, TOPIC_UPGRADE_CANCELLED, TOPIC_UPGRADE_PROPOSED, TOPIC_UPGRADE_ROLLED_BACK,
 };
 use crate::storage::extend_instance_ttl;
 use crate::types::{DataKey, PreviousVersionSnapshot, UpgradeProposal};
@@ -67,10 +67,7 @@ use crate::types::{DataKey, PreviousVersionSnapshot, UpgradeProposal};
 
 /// Return the current contract version. Starts at `1` after `initialize`.
 pub fn version(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&DataKey::Version)
-        .unwrap_or(1)
+    env.storage().instance().get(&DataKey::Version).unwrap_or(1)
 }
 
 /// Return the configured upgrade delay in seconds. Defaults to `0`.
@@ -109,11 +106,7 @@ pub fn set_upgrade_delay(env: &Env, caller: Address, seconds: u64) -> Result<(),
 ///
 /// Errors `ConflictingState` if a pending proposal already exists (cancel
 /// the previous one first).
-pub fn propose_upgrade(
-    env: &Env,
-    caller: Address,
-    new_wasm_hash: BytesN<32>,
-) -> Result<(), Error> {
+pub fn propose_upgrade(env: &Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
     extend_instance_ttl(env);
 
     let current_admin = admin::admin(env)?;
@@ -122,11 +115,7 @@ pub fn propose_upgrade(
         return Err(Error::Unauthorized);
     }
 
-    if env
-        .storage()
-        .instance()
-        .has(&DataKey::PendingUpgrade)
-    {
+    if env.storage().instance().has(&DataKey::PendingUpgrade) {
         return Err(Error::ConflictingState);
     }
 
@@ -208,9 +197,7 @@ pub fn execute_upgrade(env: &Env, caller: Address) -> Result<(), Error> {
     env.storage()
         .instance()
         .set(&DataKey::Version, &new_version);
-    env.storage()
-        .instance()
-        .remove(&DataKey::PendingUpgrade);
+    env.storage().instance().remove(&DataKey::PendingUpgrade);
     env.storage()
         .instance()
         .set(&DataKey::PreviousVersion, &snapshot);
@@ -292,9 +279,7 @@ pub fn rollback_upgrade(env: &Env, caller: Address) -> Result<(), Error> {
     env.storage()
         .instance()
         .set(&DataKey::Version, &snapshot.version);
-    env.storage()
-        .instance()
-        .remove(&DataKey::PreviousVersion);
+    env.storage().instance().remove(&DataKey::PreviousVersion);
 
     env.events().publish(
         (TOPIC_UPGRADE_ROLLED_BACK,),

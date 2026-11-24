@@ -13,12 +13,14 @@
 //! - [`interest`] — balances that grow by compound interest
 //! - [`rollover`] — locked plans that roll into a new term at maturity
 //! - [`conditional`] — withdrawals gated on price, date or balance conditions
+//! - [`inheritance`] — gradual hand-over of savings to beneficiaries
 //!
 //! This is a **skeleton**: every entrypoint is stubbed with `unimplemented!()`
 //! and a `TODO(issue)` describing the work. Each stub is one contributor issue.
 
 mod admin;
 mod challenge;
+mod collateral;
 mod conditional;
 mod delegation;
 mod error;
@@ -28,13 +30,12 @@ mod flexible;
 mod goal;
 mod group;
 mod group_split;
+mod inheritance;
 mod insurance;
 mod interest;
 pub mod interest_tiers;
 mod limits;
 mod locked;
-pub mod rewards;
-mod roundup;
 mod multisig;
 mod recurring;
 pub mod rewards;
@@ -63,7 +64,7 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Map, String, Vec
 use crate::error::Error;
 use crate::types::{
     Challenge, ChallengeKind, CompoundFrequency, Delegation, FlexibleAccount, Goal, Group,
-    GroupLimits, GroupWithdrawalRequest, InsuranceClaimRecord, InterestAccount, LockedPlan,
+    GroupLimits, GroupWithdrawalRequest, InheritancePlan, InsuranceClaimRecord, InterestAccount, LockedPlan,
     PermissionLevel, Proposal, QueuedAction, RecurringDeposit, RecurringFrequency, RewardState,
     RewardsConfig, RoundupConfig, RoundupLevel, TimelockAction, UpgradeProposal,
 };
@@ -307,6 +308,68 @@ impl SavingsVault {
         locked::get_plan(&env, plan_id)
     }
 
+    // --- inheritance planning (#635) --------------------------------------
+    /// Create or replace the owner's inheritance plan. `beneficiaries` maps
+    /// heir → share in bps (summing to 10 000). Access unlocks after
+    /// `inactivity_period` seconds without owner activity: first
+    /// `partial_access_bps` of each share, then the rest once `verifier`
+    /// attests proof of death (`None` = no proof required, full unlock).
+    /// Emits `InheritanceSetup`.
+    pub fn setup_inheritance(
+        env: Env,
+        owner: Address,
+        beneficiaries: Map<Address, u32>,
+        inactivity_period: u64,
+        partial_access_bps: u32,
+        verifier: Option<Address>,
+    ) -> Result<(), Error> {
+        inheritance::setup_inheritance(
+            &env,
+            owner,
+            beneficiaries,
+            inactivity_period,
+            partial_access_bps,
+            verifier,
+        )
+    }
+
+    /// Cancel the owner's inheritance plan.
+    pub fn cancel_inheritance(env: Env, owner: Address) -> Result<(), Error> {
+        inheritance::cancel_inheritance(&env, owner)
+    }
+
+    /// Reset the owner's inactivity clock without moving funds.
+    pub fn inheritance_check_in(env: Env, owner: Address) -> Result<(), Error> {
+        inheritance::check_in(&env, owner)
+    }
+
+    /// Verifier-only: attest the owner's proof of death, unlocking the full
+    /// share of every beneficiary.
+    pub fn verify_death_proof(
+        env: Env,
+        verifier: Address,
+        owner: Address,
+        proof_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        inheritance::verify_death_proof(&env, verifier, owner, proof_hash)
+    }
+
+    /// Beneficiary claims everything unlocked for them so far. Returns the
+    /// amount paid. Emits `InheritanceClaimed`.
+    pub fn claim_inheritance(env: Env, beneficiary: Address, owner: Address) -> Result<i128, Error> {
+        inheritance::claim_inheritance(&env, beneficiary, owner)
+    }
+
+    /// The owner's inheritance plan, if any.
+    pub fn inheritance_plan(env: Env, owner: Address) -> Option<InheritancePlan> {
+        inheritance::get_plan(&env, owner)
+    }
+
+    /// Amount `beneficiary` could claim from `owner`'s plan right now.
+    pub fn inheritance_claimable(env: Env, owner: Address, beneficiary: Address) -> i128 {
+        inheritance::claimable(&env, owner, beneficiary)
+    }
+
     // --- locked rollover (#638) -------------------------------------------
     /// Opt a locked plan into auto-rollover at maturity. `lock_period` is the
     /// new plan's lock length in seconds; `0` reuses the original term.
@@ -446,36 +509,19 @@ impl SavingsVault {
         expires_at: u64,
     ) -> Result<u64, Error> {
         multisig::request_withdrawal(
-            &env,
-            requester,
-            group_id,
-            recipient,
-            amount,
-            threshold,
-            expires_at,
+            &env, requester, group_id, recipient, amount, threshold, expires_at,
         )
     }
 
-    pub fn approve_withdrawal(
-        env: Env,
-        approver: Address,
-        request_id: u64,
-    ) -> Result<(), Error> {
+    pub fn approve_withdrawal(env: Env, approver: Address, request_id: u64) -> Result<(), Error> {
         multisig::approve_withdrawal(&env, approver, request_id)
     }
 
-    pub fn reject_withdrawal(
-        env: Env,
-        rejector: Address,
-        request_id: u64,
-    ) -> Result<(), Error> {
+    pub fn reject_withdrawal(env: Env, rejector: Address, request_id: u64) -> Result<(), Error> {
         multisig::reject_withdrawal(&env, rejector, request_id)
     }
 
-    pub fn withdrawal_request(
-        env: Env,
-        request_id: u64,
-    ) -> Result<GroupWithdrawalRequest, Error> {
+    pub fn withdrawal_request(env: Env, request_id: u64) -> Result<GroupWithdrawalRequest, Error> {
         multisig::get_withdrawal_request(&env, request_id)
     }
 
@@ -937,6 +983,10 @@ impl SavingsVault {
         roundup::enable(&env, owner, level)
     }
 
+    pub fn disable_roundup(env: Env, owner: Address) -> Result<(), Error> {
+        roundup::disable(&env, owner)
+    }
+
     pub fn roundup_config(env: Env, owner: Address) -> Result<RoundupConfig, Error> {
         roundup::get_config(&env, owner)
     }
@@ -947,5 +997,133 @@ impl SavingsVault {
         amount: i128,
     ) -> Result<i128, Error> {
         roundup::record_transaction(&env, owner, amount)
+    }
+
+    // --- savings vault loan collateralization (#645) ----------------------
+
+    /// Register `lender` as an authorised lender. Admin-only.
+    pub fn register_lender(env: Env, caller: Address, lender: Address) -> Result<(), Error> {
+        collateral::register_lender(&env, caller, lender)
+    }
+
+    /// Deregister a lender. Admin-only.
+    pub fn deregister_lender(env: Env, caller: Address, lender: Address) -> Result<(), Error> {
+        collateral::deregister_lender(&env, caller, lender)
+    }
+
+    /// Whether `lender` is registered.
+    pub fn is_registered_lender(env: Env, lender: Address) -> bool {
+        collateral::is_registered_lender(&env, &lender)
+    }
+
+    /// Enable the caller's vault as collateral for `loan_id`.
+    ///
+    /// Pass `loan_id = 0` to create a new loan; pass an existing id to join it.
+    /// Returns the loan id (new or existing).
+    pub fn enable_as_collateral(
+        env: Env,
+        owner: Address,
+        loan_id: u64,
+        borrow_ratio_bps: u32,
+        liquidation_ratio_bps: u32,
+    ) -> Result<u64, Error> {
+        collateral::enable_as_collateral(
+            &env,
+            owner,
+            loan_id,
+            borrow_ratio_bps,
+            liquidation_ratio_bps,
+        )
+    }
+
+    /// Disable the caller's vault as collateral. Only permitted when debt is 0.
+    pub fn disable_collateral(env: Env, owner: Address) -> Result<(), Error> {
+        collateral::disable_collateral(&env, owner)
+    }
+
+    /// Record a borrow of `amount` against `owner`'s vault. Lender-only.
+    pub fn collateral_borrow(
+        env: Env,
+        lender: Address,
+        owner: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        collateral::record_borrow(&env, lender, owner, amount)
+    }
+
+    /// Record a repayment of `amount` against `owner`'s vault. Lender-only.
+    pub fn collateral_repay(
+        env: Env,
+        lender: Address,
+        owner: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        collateral::record_repay(&env, lender, owner, amount)
+    }
+
+    /// Liquidate `owner`'s vault if undercollateralized. Permissionless.
+    pub fn liquidate(env: Env, owner: Address) -> Result<(), Error> {
+        collateral::liquidate(&env, owner)
+    }
+
+    /// Read the collateral state for `owner` (or `NotFound`).
+    pub fn collateral_state(env: Env, owner: Address) -> Result<CollateralState, Error> {
+        collateral::get_collateral_state(&env, owner)
+    }
+
+    /// Read the loan record for `loan_id` (or `NotFound`).
+    pub fn loan_record(env: Env, loan_id: u64) -> Result<LoanRecord, Error> {
+        collateral::get_loan_record(&env, loan_id)
+    }
+
+    /// Read the vault owner addresses backing `loan_id`.
+    pub fn loan_vaults(env: Env, loan_id: u64) -> Vec<Address> {
+        collateral::get_loan_vaults(&env, loan_id)
+    }
+
+    /// Designate a beneficiary for the caller's flexible savings balance.
+    ///
+    /// Creates the inheritance plan on the first call. Pass `share_bps` in
+    /// basis points (1–10_000). To enable claiming, all beneficiary shares must
+    /// sum to exactly 10_000 and an inactivity timeout must be configured.
+    pub fn designate_beneficiary(
+        env: Env,
+        owner: Address,
+        beneficiary: Address,
+        share_bps: u32,
+    ) -> Result<(), Error> {
+        inheritance::designate_beneficiary(&env, owner, beneficiary, share_bps)
+    }
+
+    /// Remove a beneficiary from the caller's inheritance plan.
+    pub fn remove_beneficiary(env: Env, owner: Address, beneficiary: Address) -> Result<(), Error> {
+        inheritance::remove_beneficiary(&env, owner, beneficiary)
+    }
+
+    /// Set the inactivity timeout (in seconds) for the caller's inheritance plan.
+    ///
+    /// Once `now >= last_active_at + timeout` and beneficiary shares sum to
+    /// 10_000, any beneficiary may call `claim_inheritance`. Setting `0`
+    /// disables automatic inheritance.
+    pub fn set_inactivity_timeout(
+        env: Env,
+        owner: Address,
+        timeout_seconds: u64,
+    ) -> Result<(), Error> {
+        inheritance::set_inactivity_timeout(&env, owner, timeout_seconds)
+    }
+
+    /// Claim the inheritance of `owner`'s flexible balance.
+    ///
+    /// Succeeds when: a plan exists, the inactivity timeout has elapsed,
+    /// beneficiary shares sum to 10_000, and `claimer` is a designated
+    /// beneficiary. Each beneficiary receives their proportional share.
+    pub fn claim_inheritance(env: Env, claimer: Address, owner: Address) -> Result<(), Error> {
+        inheritance::claim_inheritance(&env, claimer, owner)
+    }
+
+    /// Read the inheritance plan for `owner`.
+    pub fn get_inheritance_plan(env: Env, owner: Address) -> Result<InheritancePlan, Error> {
+        inheritance::get_plan(&env, owner)
     }
 }

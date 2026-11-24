@@ -183,11 +183,7 @@ pub fn transfer_in(env: &Env, from: &Address, amount: i128) -> Result<(), Error>
 
 /// Move `amount` of the vault token from `from` into the contract using the
 /// vault's SEP-41 allowance. The owner must have approved the vault beforehand.
-pub fn transfer_in_from_allowance(
-    env: &Env,
-    from: &Address,
-    amount: i128,
-) -> Result<(), Error> {
+pub fn transfer_in_from_allowance(env: &Env, from: &Address, amount: i128) -> Result<(), Error> {
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }

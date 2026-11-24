@@ -20,7 +20,9 @@ struct MockOracle;
 #[contractimpl]
 impl MockOracle {
     pub fn set_price(env: Env, price: i128) {
-        env.storage().instance().set(&symbol_short!("price"), &price);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("price"), &price);
     }
 
     pub fn price(env: Env, _asset: Address) -> i128 {
@@ -42,7 +44,11 @@ fn setup(env: &Env) -> (SavingsVaultClient<'_>, Address, Address, Address, Addre
     (client, admin, token, vault, owner)
 }
 
-fn setup_oracle<'a>(env: &'a Env, client: &SavingsVaultClient, admin: &Address) -> MockOracleClient<'a> {
+fn setup_oracle<'a>(
+    env: &'a Env,
+    client: &SavingsVaultClient,
+    admin: &Address,
+) -> MockOracleClient<'a> {
     let oracle_id = env.register(MockOracle, ());
     let oracle = MockOracleClient::new(env, &oracle_id);
     client.set_price_oracle(admin, &oracle_id);
@@ -78,11 +84,19 @@ fn invalid_conditions_rejected() {
     let asset = Address::generate(&env);
 
     assert_eq!(
-        client.try_set_withdrawal_condition(&owner, &WithdrawalCondition::AfterDate(1_000), &WITHDRAW),
+        client.try_set_withdrawal_condition(
+            &owner,
+            &WithdrawalCondition::AfterDate(1_000),
+            &WITHDRAW
+        ),
         Err(Ok(Error::InvalidCondition))
     );
     assert_eq!(
-        client.try_set_withdrawal_condition(&owner, &WithdrawalCondition::BalanceAbove(-1), &WITHDRAW),
+        client.try_set_withdrawal_condition(
+            &owner,
+            &WithdrawalCondition::BalanceAbove(-1),
+            &WITHDRAW
+        ),
         Err(Ok(Error::InvalidCondition))
     );
     assert_eq!(
@@ -247,12 +261,14 @@ fn event_includes_condition_details() {
                     == Some("ConditionalWithdrawal")
         })
         .expect("ConditionalWithdrawal event emitted");
-    assert_eq!(event.topics.get(1).and_then(|t| t.as_address()), Some(owner.clone()));
+    assert_eq!(
+        event.topics.get(1).and_then(|t| t.as_address()),
+        Some(owner.clone())
+    );
 
     let (_, _, data) = event.into_parts();
     let (emitted_owner, amount, emitted_condition, observed, new_balance, _now) =
-        <(Address, i128, WithdrawalCondition, i128, i128, u64)>::try_from_val(&env, &data)
-            .unwrap();
+        <(Address, i128, WithdrawalCondition, i128, i128, u64)>::try_from_val(&env, &data).unwrap();
     assert_eq!(emitted_owner, owner);
     assert_eq!(amount, WITHDRAW);
     assert_eq!(emitted_condition, condition);

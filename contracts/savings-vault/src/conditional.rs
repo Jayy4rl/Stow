@@ -217,7 +217,14 @@ pub fn execute_conditional_withdrawal(env: &Env, owner: Address) -> Result<i128,
 
     env.events().publish(
         (TOPIC_CONDITIONAL_WITHDRAWAL, owner.clone()),
-        (owner, rule.amount, rule.condition, observed, new_balance, now),
+        (
+            owner,
+            rule.amount,
+            rule.condition,
+            observed,
+            new_balance,
+            now,
+        ),
     );
 
     Ok(rule.amount)

@@ -6,8 +6,8 @@ use soroban_sdk::{
     Address, Env,
 };
 
-use crate::error::Error;
 use super::{mint, set_ledger_time, setup_with_token_and_id};
+use crate::error::Error;
 use crate::types::{RecurringDeposit, RecurringFrequency};
 
 const DAY: u64 = 86_400;
@@ -49,7 +49,10 @@ fn recurring_execution_rejects_insufficient_wallet_balance() {
         client.try_execute_recurring(&owner),
         Err(Ok(Error::InsufficientBalance))
     );
-    assert_eq!(client.recurring_deposit(&owner).unwrap().next_execution, due);
+    assert_eq!(
+        client.recurring_deposit(&owner).unwrap().next_execution,
+        due
+    );
 }
 
 #[test]
